@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Capability for the main kiosk window",
+  "windows": ["*"],
+  "permissions": [
+    "core:default"
+  ],
+  "remote": {
+    "urls": ["https://*", "http://*"]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "kiosk-browser",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kiosk browser with low-level keyboard capture"
+}

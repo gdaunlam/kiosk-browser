@@ -1,0 +1,22 @@
+# Rust / Cargo
+src-tauri/target/
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Tauri dev artifacts
+src-tauri/gen/
