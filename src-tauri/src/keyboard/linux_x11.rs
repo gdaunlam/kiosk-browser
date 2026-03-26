@@ -33,7 +33,10 @@ unsafe extern "C" fn x_error_handler(_display: *mut Display, event: *mut XErrorE
 }
 
 /// Install X11 key grabs that intercept system shortcuts before the window manager.
-/// Runs an event drain loop on a dedicated background thread.
+/// Grabs use `GrabModeSync` so each captured `KeyPress` can be replayed to the
+/// focused window via `XAllowEvents(ReplayKeyboard)`.  This produces a **trusted**
+/// DOM event (`isTrusted: true`) in the webview, unlike synthetic JS events.
+/// Runs an event loop on a dedicated background thread.
 pub fn install_hook(keys: HashSet<BlockableKey>) {
     std::thread::Builder::new()
         .name("keyboard-guard".into())
@@ -63,9 +66,7 @@ pub fn install_hook(keys: HashSet<BlockableKey>) {
             if errors > 0 {
                 log::warn!(
                     "X11 keyboard guard: {errors} grabs failed (BadAccess). \
-                     The window manager likely already holds these key grabs. \
-                     On GNOME, try: gsettings set org.gnome.mutter overlay-key '' \
-                     to release the Super key."
+                     The window manager likely already holds these key grabs."
                 );
             }
 
@@ -94,30 +95,17 @@ unsafe fn grab_key_combo(display: *mut Display, root: Window, key: &BlockableKey
             log::warn!("Keycode 0 for {:?} — key not found on this keyboard", key);
             continue;
         }
-        if base_mod == AnyModifier {
+        for &extra in &IGNORED_MODS {
             XGrabKey(
                 display,
                 keycode as c_int,
-                AnyModifier,
+                base_mod | extra,
                 root,
                 True,
                 GrabModeAsync,
-                GrabModeAsync,
+                GrabModeSync,
             );
             count += 1;
-        } else {
-            for &extra in &IGNORED_MODS {
-                XGrabKey(
-                    display,
-                    keycode as c_int,
-                    base_mod | extra,
-                    root,
-                    True,
-                    GrabModeAsync,
-                    GrabModeAsync,
-                );
-                count += 1;
-            }
         }
     }
     count
@@ -129,12 +117,8 @@ unsafe fn ungrab_key_combo(display: *mut Display, root: Window, key: &BlockableK
         if keycode == 0 {
             continue;
         }
-        if base_mod == AnyModifier {
-            XUngrabKey(display, keycode as c_int, AnyModifier, root);
-        } else {
-            for &extra in &IGNORED_MODS {
-                XUngrabKey(display, keycode as c_int, base_mod | extra, root);
-            }
+        for &extra in &IGNORED_MODS {
+            XUngrabKey(display, keycode as c_int, base_mod | extra, root);
         }
     }
 }
@@ -145,8 +129,8 @@ unsafe fn key_to_x11(display: *mut Display, key: &BlockableKey) -> Vec<(u32, c_u
 
     match key {
         BlockableKey::Win => vec![
-            (kc(XK_Super_L), AnyModifier),
-            (kc(XK_Super_R), AnyModifier),
+            (kc(XK_Super_L), 0),
+            (kc(XK_Super_R), 0),
         ],
         BlockableKey::AltTab => vec![(kc(XK_Tab), Mod1Mask)],
         BlockableKey::AltF4 => vec![(kc(XK_F4), Mod1Mask)],
@@ -160,11 +144,25 @@ unsafe fn key_to_x11(display: *mut Display, key: &BlockableKey) -> Vec<(u32, c_u
     }
 }
 
-/// Drain X events forever so grabbed key events don't pile up.
-/// The events are intentionally discarded — we only want to suppress them.
+/// Process grabbed key events forever.  For each `KeyPress` we call
+/// `XAllowEvents(ReplayKeyboard)` which releases the synchronous grab and
+/// replays the event from the root window down to the focused window,
+/// **skipping all passive grabs at or above root**.  This means:
+///   - the WM never sees the event  (blocked from OS)
+///   - the webview receives it as a real X11 event  (isTrusted = true)
 unsafe fn drain_events(display: *mut Display) {
     let mut event: XEvent = std::mem::zeroed();
     loop {
         XNextEvent(display, &mut event);
+        if event.type_ == KeyPress {
+            log::info!(
+                "X11: replaying keycode {} (state=0x{:04x}) to webview",
+                event.key.keycode,
+                event.key.state
+            );
+            // Replay the event to the focused window, bypassing root grabs
+            XAllowEvents(display, ReplayKeyboard, CurrentTime);
+            XFlush(display);
+        }
     }
 }

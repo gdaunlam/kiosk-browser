@@ -103,12 +103,15 @@ Before setting up key grabs, the app attempts to disable conflicting WM shortcut
 - **GNOME**: Disables shortcuts via `gsettings` (overlay-key, switch-applications, close, etc.).
 - **XFCE**: Removes shortcut overrides via `xfconf-query`.
 
-### Layer 2: X11 key grabs
+### Layer 2: X11 key grabs + event forwarding
 
-`XGrabKey` on the X11 root window intercepts events injected by VNC/xrdp/virtual
-keyboards that bypass `/dev/input`. Always attempted alongside evdev on X11 sessions.
+`XGrabKey` on the X11 root window intercepts key events before the WM or
+compositor sees them. Captured events are **forwarded to the webview** as
+synthetic DOM `KeyboardEvent`s via `window.eval()`, so the web page can still
+react to the blocked key combinations (e.g. Alt+F4 triggers an in-app close).
 
-Subject to `BadAccess` conflicts with remaining WM grabs (Layer 1 mitigates this).
+Layer 1 (WM shortcut disabling) runs first to release the WM's own passive
+grabs — this prevents `BadAccess` errors when our grabs are installed.
 
 ### Layer 3: evdev backend
 

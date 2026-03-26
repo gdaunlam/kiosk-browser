@@ -1,5 +1,6 @@
 use super::keys::BlockableKey;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{HMODULE, LPARAM, LRESULT, WPARAM};
@@ -8,11 +9,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
-    HHOOK, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
+    CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
+    KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP,
 };
 
 static BLOCKED_KEYS: OnceLock<HashSet<BlockableKey>> = OnceLock::new();
+
+// Internal modifier tracking: blocking a keydown via LRESULT(1) prevents
+// GetAsyncKeyState from seeing the key as pressed, so Win+X combos would
+// fail to detect the Win modifier. We track it ourselves instead.
+static LWIN_DOWN: AtomicBool = AtomicBool::new(false);
+static RWIN_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// Install a low-level keyboard hook that blocks the configured keys.
 /// Runs the message pump on a dedicated background thread.
@@ -22,13 +30,14 @@ pub fn install_hook(keys: HashSet<BlockableKey>) {
     std::thread::Builder::new()
         .name("keyboard-guard".into())
         .spawn(|| unsafe {
-            let hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), HMODULE::default(), 0) {
-                Ok(h) => h,
-                Err(e) => {
-                    log::error!("Failed to install keyboard hook: {e}");
-                    return;
-                }
-            };
+            let hook =
+                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), HMODULE::default(), 0) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        log::error!("Failed to install keyboard hook: {e}");
+                        return;
+                    }
+                };
 
             log::info!("Low-level keyboard hook installed");
 
@@ -46,11 +55,19 @@ pub fn install_hook(keys: HashSet<BlockableKey>) {
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         let action = wparam.0 as u32;
-        if action == WM_KEYDOWN || action == WM_SYSKEYDOWN {
-            let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            if should_block(kb) {
-                return LRESULT(1);
-            }
+        let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        let is_down = action == WM_KEYDOWN || action == WM_SYSKEYDOWN;
+
+        // Track Win key state before deciding whether to block.
+        if kb.vkCode == VK_LWIN.0 as u32 {
+            LWIN_DOWN.store(is_down, Ordering::SeqCst);
+        } else if kb.vkCode == VK_RWIN.0 as u32 {
+            RWIN_DOWN.store(is_down, Ordering::SeqCst);
+        }
+
+        let is_key_event = is_down || action == WM_KEYUP || action == WM_SYSKEYUP;
+        if is_key_event && should_block(kb) {
+            return LRESULT(1);
         }
     }
     CallNextHookEx(HHOOK::default(), code, wparam, lparam)
@@ -66,7 +83,7 @@ unsafe fn should_block(kb: &KBDLLHOOKSTRUCT) -> bool {
     let alt_down = (kb.flags & LLKHF_ALTDOWN).0 != 0;
 
     let win_down = || -> bool {
-        GetAsyncKeyState(VK_LWIN.0 as i32) < 0 || GetAsyncKeyState(VK_RWIN.0 as i32) < 0
+        LWIN_DOWN.load(Ordering::SeqCst) || RWIN_DOWN.load(Ordering::SeqCst)
     };
     let ctrl_down = || -> bool { GetAsyncKeyState(VK_CONTROL.0 as i32) < 0 };
 

@@ -13,6 +13,9 @@ use keys::BlockableKey;
 use std::collections::HashSet;
 
 /// Start the keyboard guard, blocking the given set of keys at the OS level.
+/// On Linux, captured events are replayed to the focused window (the webview)
+/// via `XAllowEvents(ReplayKeyboard)` so the web page receives them as trusted
+/// DOM events while the WM/OS does not.
 /// Spawns a background thread that runs for the lifetime of the process.
 pub fn start_guard(keys: HashSet<BlockableKey>) {
     if keys.is_empty() {
@@ -55,11 +58,12 @@ pub fn start_guard(keys: HashSet<BlockableKey>) {
             log::info!("Keyboard guard: evdev backend active");
         }
 
-        // X11 grabs: catches events injected by VNC/xrdp/virtual keyboards
-        // that bypass /dev/input. Always try alongside evdev.
         if !is_wayland {
-            try_disable_wm_shortcuts();
-            log::info!("Keyboard guard: attempting X11 key grabs");
+            // Release WM grabs so our XGrabKey calls don't get BadAccess
+            let _ = try_disable_wm_shortcuts();
+
+            // X11 grabs with GrabModeSync + ReplayKeyboard: events are blocked
+            // from the WM but replayed to the focused webview window.
             linux_x11::install_hook(keys);
         } else if !evdev_active {
             log::error!(
@@ -75,21 +79,25 @@ pub fn start_guard(keys: HashSet<BlockableKey>) {
 }
 
 /// Best-effort: ask the running Window Manager to release its global shortcut
-/// grabs so that subsequent `XGrabKey` calls succeed instead of getting BadAccess.
+/// grabs. Returns `true` if at least one WM-specific disabling succeeded,
+/// meaning keys will flow naturally to the webview without XGrabKey.
 #[cfg(target_os = "linux")]
-fn try_disable_wm_shortcuts() {
+fn try_disable_wm_shortcuts() -> bool {
     ensure_dbus_session_env();
 
-    // KDE/KWin: single D-Bus call disables ALL global shortcuts at runtime.
     if try_disable_kwin() {
-        return;
+        return true;
     }
 
-    // GNOME/Mutter: disable individual shortcuts via gsettings.
-    try_disable_gnome();
+    if try_disable_gnome() {
+        return true;
+    }
 
-    // XFCE/xfwm4: try xfconf-query.
-    try_disable_xfce();
+    if try_disable_xfce() {
+        return true;
+    }
+
+    false
 }
 
 /// When running via `sudo`, DBUS_SESSION_BUS_ADDRESS is usually stripped.
@@ -274,7 +282,7 @@ fn reconfigure_kwin() {
 }
 
 #[cfg(target_os = "linux")]
-fn try_disable_gnome() {
+fn try_disable_gnome() -> bool {
     let overrides: &[(&str, &str, &str)] = &[
         ("org.gnome.mutter", "overlay-key", ""),
         ("org.gnome.desktop.wm.keybindings", "switch-applications", "[]"),
@@ -302,10 +310,11 @@ fn try_disable_gnome() {
              (changes persist until manually restored)"
         );
     }
+    any
 }
 
 #[cfg(target_os = "linux")]
-fn try_disable_xfce() {
+fn try_disable_xfce() -> bool {
     let keys: &[(&str, &str)] = &[
         ("/xfwm4/custom/<Super>", "override"),
         ("/xfwm4/custom/<Alt>Tab", "override"),
@@ -326,4 +335,5 @@ fn try_disable_xfce() {
     if any {
         log::info!("Removed XFCE shortcut overrides via xfconf-query");
     }
+    any
 }

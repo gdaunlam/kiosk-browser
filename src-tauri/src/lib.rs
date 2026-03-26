@@ -12,7 +12,7 @@ const CLOSE_BUTTON_JS: &str = r#"
         var el = document.createElement('div');
         el.id = 'kiosk-close-tab';
         el.innerHTML = '<style>'
-            + '#kiosk-close-tab { position:fixed; top:0; right:20px; z-index:2147483647; }'
+            + '#kiosk-close-tab { position:fixed; top:10px; right:20px; z-index:2147483647; }'
             + '#kiosk-close-tab .ktab { width:48px; height:6px; background:rgba(180,180,180,0.35);'
             + '  border-radius:0 0 8px 8px; transition:all .25s ease; display:flex;'
             + '  align-items:center; justify-content:center; cursor:pointer; overflow:hidden; }'

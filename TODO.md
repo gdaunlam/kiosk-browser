@@ -6,6 +6,17 @@
 
 ## Completado
 
+### Teclas bloqueadas llegan al sitio web (Linux)
+- `XGrabKey` siempre se instala para capturar las teclas antes que el WM/compositor.
+- Los eventos capturados se reenvían al webview como `KeyboardEvent` DOM sintéticos via `window.eval()`. Esto bypasea la cadena GTK → WebKitGTK que podía filtrar las teclas.
+- Layer 1 (desactivación de atajos del WM via gsettings/kwriteconfig) se ejecuta primero para liberar los grabs pasivos del WM y evitar errores `BadAccess` en los nuestros.
+- El sitio recibe keydown/keyup con las propiedades correctas (`altKey`, `metaKey`, `ctrlKey`, `shiftKey`, `key`, `code`).
+
+### Fix hook de teclado en Windows
+- El hook ahora bloquea tanto `WM_KEYDOWN`/`WM_SYSKEYDOWN` como `WM_KEYUP`/`WM_SYSKEYUP`. Esto corrige el Win key (el Start menu se activaba en key release).
+- Se trackea el estado de Win key internamente con `AtomicBool` en lugar de `GetAsyncKeyState`, porque bloquear el keydown impedía que `GetAsyncKeyState` viera la tecla como presionada (y los combos Win+X fallaban).
+- Se movió el overlay del botón de cierre de `top:0` a `top:10px` para evitar la dead zone de ~8px en Windows donde los eventos de mouse no llegan al webview (issue conocido de Tauri/WRY con `decorations:false`).
+
 ### Protección multicapa contra atajos del sistema (Linux)
 - **Layer 0 — Tauri `prevent_close`**: `on_window_event` intercepta `CloseRequested` y llama `api.prevent_close()` cuando Alt+F4 está en la lista de teclas bloqueadas. Funciona en Windows y Linux.
 - **Layer 1 — Desactivación de atajos del WM**: En KDE Plasma 6, usa `disableGlobalShortcuts` via D-Bus. En KDE Plasma 5, modifica `kglobalshortcutsrc` y `kwinrc` via `kwriteconfig5` y dispara `reconfigure` via D-Bus. En GNOME usa `gsettings`. En XFCE usa `xfconf-query`. Maneja correctamente el caso `sudo` (ejecuta `kwriteconfig` como el usuario original).

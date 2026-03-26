@@ -31,9 +31,9 @@ src-tauri/src/
 └── keyboard/
     ├── mod.rs          # start_guard() dispatcher: evdev → X11 fallback, Wayland detection
     ├── keys.rs         # BlockableKey enum, FromStr, resolve_blocked_keys()
-    ├── windows.rs      # WH_KEYBOARD_LL hook + GetMessageW pump
+    ├── windows.rs      # WH_KEYBOARD_LL hook + GetMessageW pump + internal modifier tracking
     ├── linux_evdev.rs  # evdev EVIOCGRAB + uinput virtual keyboard filter (primary on Linux)
-    └── linux_x11.rs    # XGrabKey on root window + XNextEvent drain loop (fallback)
+    └── linux_x11.rs    # XGrabKey on root window + event forwarding to webview via JS
 ```
 
 ## Key design decisions
@@ -59,11 +59,11 @@ On Windows, WebView2 handles TLS errors through its own mechanisms (expected to 
 ### 5. Keyboard guard — platform dispatch
 
 `keyboard/mod.rs` checks the OS at compile time:
-- **Windows**: Spawns a thread with `SetWindowsHookExW(WH_KEYBOARD_LL)` + `GetMessageW` message pump. Blocks keys by returning `LRESULT(1)` without calling `CallNextHookEx`.
+- **Windows**: Spawns a thread with `SetWindowsHookExW(WH_KEYBOARD_LL)` + `GetMessageW` message pump. Blocks keys by returning `LRESULT(1)` without calling `CallNextHookEx`. Blocks both keydown (`WM_KEYDOWN`/`WM_SYSKEYDOWN`) and keyup (`WM_KEYUP`/`WM_SYSKEYUP`) — the Win key Start menu activates on key release, so blocking only keydown is insufficient. Win key state is tracked internally with `AtomicBool` because blocking a keydown prevents `GetAsyncKeyState` from seeing the key as pressed, breaking Win+X combo detection.
 - **Linux**: Multi-layer approach, all layers run simultaneously:
   - **Layer 0 (Tauri)**: `on_window_event` in `lib.rs` intercepts `CloseRequested` and calls `prevent_close()` when AltF4 is blocked. Last line of defense on both OS.
   - **Layer 1 (WM config)**: `try_disable_wm_shortcuts()` in `mod.rs` disables WM shortcuts before grabbing keys. KDE 6 uses D-Bus `disableGlobalShortcuts`. KDE 5 modifies `kglobalshortcutsrc` + `kwinrc` via `kwriteconfig5` and triggers `KWin.reconfigure`. GNOME uses `gsettings`. XFCE uses `xfconf-query`. Handles `sudo` by running `kwriteconfig` as the original user.
-  - **Layer 2 (X11 grabs)**: `XGrabKey` on root window — catches VNC/xrdp injected events that bypass `/dev/input`.
+  - **Layer 2 (X11 grabs + forwarding)**: `XGrabKey` on root window — always installed. Captured events are forwarded to the webview as synthetic DOM `KeyboardEvent`s via `window.eval()` so the web page can react to them. Layer 1 runs first to release WM grabs and avoid `BadAccess`.
   - **Layer 3 (evdev)**: `EVIOCGRAB` on `/dev/input/eventN` + `uinput` filter — effective on bare-metal, bypasses WM entirely. Requires root or `input` group.
 - **Other**: Logs a warning, no blocking.
 
@@ -77,7 +77,8 @@ For Super/Win key on Linux X11, `AnyModifier` is used so all Super+X combos are 
 
 ### Keyboard capture on Linux
 
-- **Multi-layer approach**: Layer 0 (Tauri prevent_close) + Layer 1 (WM shortcut disabling) + Layer 2 (X11 XGrabKey) + Layer 3 (evdev EVIOCGRAB). All layers run simultaneously.
+- **Multi-layer approach**: Layer 0 (Tauri prevent_close) + Layer 1 (WM shortcut disabling) + Layer 2 (X11 XGrabKey + JS forwarding) + Layer 3 (evdev EVIOCGRAB). All layers run simultaneously.
+- **X11 event forwarding**: Captured key events are injected into the webview as synthetic DOM `KeyboardEvent`s via `window.eval()`. This bypasses GTK/WebKitGTK event filtering that may swallow modifier key combos.
 - **VNC/container environments**: evdev grabs `/dev/input` devices but VNC keyboard events arrive via the display protocol, bypassing `/dev/input`. Layers 0–2 handle these cases.
 - **KDE Plasma 5**: Does NOT support `disableGlobalShortcuts` D-Bus method (Plasma 6 only). Config files are modified via `kwriteconfig5` + `reconfigure` instead.
 - **Permissions**: evdev requires root or `input` group membership. WM config changes work as the current user.
@@ -87,8 +88,12 @@ For Super/Win key on Linux X11, `AnyModifier` is used so all Super+X combos are 
 
 ### Keyboard capture on Windows
 
+- **Hook blocks both keydown and keyup**: Required because the Win key Start menu activates on `WM_KEYUP`, not keydown.
+- **Internal modifier tracking**: Win key state is tracked with `AtomicBool` (not `GetAsyncKeyState`) because blocking a keydown via `LRESULT(1)` prevents the system key state from being updated.
+- **Close button overlay at `top:10px`**: Tauri/WRY with `decorations:false` has an ~8px dead zone at window edges where mouse events don't reach the webview. The overlay is offset to avoid this.
 - **Win+L**: Partially blockable (kernel/security policy may override).
 - **Ctrl+Alt+Del**: Not blockable (Windows Secure Attention Sequence, kernel-level).
+- **Alt+Tab on Windows 10/11**: If the LL hook does not block Alt+Tab, it may be handled at the DWM/shell level before hooks. OS-level configuration (Group Policy, shell replacement) may be needed.
 
 ### Unused dependencies
 
@@ -107,7 +112,8 @@ For Super/Win key on Linux X11, `AnyModifier` is used so all Super+X combos are 
 - CLI argument parsing with presets
 - GitHub Actions CI for Windows + Linux
 - Keyboard capture on Linux via evdev (bypasses WM grabs, works on X11 and Wayland)
-- Multi-layer keyboard guard: Tauri prevent_close + WM shortcut disabling (KDE 5/6, GNOME, XFCE) + X11 grabs + evdev
+- Multi-layer keyboard guard: Tauri prevent_close + WM shortcut disabling (KDE 5/6, GNOME, XFCE) + X11 grabs with JS forwarding + evdev
+- X11-captured key events forwarded to webview as synthetic DOM KeyboardEvents
 
 ## What needs work
 
@@ -115,7 +121,7 @@ For Super/Win key on Linux X11, `AnyModifier` is used so all Super+X combos are 
 
 ## Adding a new platform
 
-1. Create `src-tauri/src/keyboard/<platform>.rs` with `pub fn install_hook(keys: HashSet<BlockableKey>)`.
+1. Create `src-tauri/src/keyboard/<platform>.rs` with `pub fn install_hook(keys: HashSet<BlockableKey>, ...)` (see existing modules for signature).
 2. Add `#[cfg(target_os = "<platform>")]` branch in `keyboard/mod.rs`.
 3. Add platform-specific dependencies under `[target.'cfg(target_os = "<platform>")'.dependencies]` in `Cargo.toml`.
 4. Create `README.<platform>.md` with build instructions.
