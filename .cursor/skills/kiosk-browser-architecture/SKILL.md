@@ -60,8 +60,11 @@ On Windows, WebView2 handles TLS errors through its own mechanisms (expected to 
 
 `keyboard/mod.rs` checks the OS at compile time:
 - **Windows**: Spawns a thread with `SetWindowsHookExW(WH_KEYBOARD_LL)` + `GetMessageW` message pump. Blocks keys by returning `LRESULT(1)` without calling `CallNextHookEx`.
-- **Linux (primary — evdev)**: Enumerates `/dev/input/eventN` devices, identifies keyboards by supported key capabilities, grabs them exclusively with `EVIOCGRAB`. A per-device thread reads raw input events, tracks modifier state, filters blocked key combos, and forwards allowed events through a `uinput` virtual keyboard. Bypasses the WM entirely — no `BadAccess` conflicts. Requires root or `input` group.
-- **Linux (fallback — X11)**: If evdev fails (permissions), falls back to `XGrabKey` on root window. Same as before: opens a separate `XOpenDisplay`, grabs key+modifier combos (including NumLock/CapsLock variants), drains events. Subject to WM `BadAccess` conflicts.
+- **Linux**: Multi-layer approach, all layers run simultaneously:
+  - **Layer 0 (Tauri)**: `on_window_event` in `lib.rs` intercepts `CloseRequested` and calls `prevent_close()` when AltF4 is blocked. Last line of defense on both OS.
+  - **Layer 1 (WM config)**: `try_disable_wm_shortcuts()` in `mod.rs` disables WM shortcuts before grabbing keys. KDE 6 uses D-Bus `disableGlobalShortcuts`. KDE 5 modifies `kglobalshortcutsrc` + `kwinrc` via `kwriteconfig5` and triggers `KWin.reconfigure`. GNOME uses `gsettings`. XFCE uses `xfconf-query`. Handles `sudo` by running `kwriteconfig` as the original user.
+  - **Layer 2 (X11 grabs)**: `XGrabKey` on root window — catches VNC/xrdp injected events that bypass `/dev/input`.
+  - **Layer 3 (evdev)**: `EVIOCGRAB` on `/dev/input/eventN` + `uinput` filter — effective on bare-metal, bypasses WM entirely. Requires root or `input` group.
 - **Other**: Logs a warning, no blocking.
 
 ### 6. Key blocking granularity
@@ -74,11 +77,13 @@ For Super/Win key on Linux X11, `AnyModifier` is used so all Super+X combos are 
 
 ### Keyboard capture on Linux
 
-- **evdev backend** solves the WM conflict problem. By grabbing at the kernel input level, the WM never sees the events. Works on both X11 and Wayland.
-- **Permissions**: evdev requires root or `input` group membership. In kiosk deployments this is typically acceptable.
-- **X11 fallback** still has the original limitations: KDE/GNOME hold their own grabs, `XGrabKey` gets `BadAccess`. Only used when evdev is unavailable.
+- **Multi-layer approach**: Layer 0 (Tauri prevent_close) + Layer 1 (WM shortcut disabling) + Layer 2 (X11 XGrabKey) + Layer 3 (evdev EVIOCGRAB). All layers run simultaneously.
+- **VNC/container environments**: evdev grabs `/dev/input` devices but VNC keyboard events arrive via the display protocol, bypassing `/dev/input`. Layers 0–2 handle these cases.
+- **KDE Plasma 5**: Does NOT support `disableGlobalShortcuts` D-Bus method (Plasma 6 only). Config files are modified via `kwriteconfig5` + `reconfigure` instead.
+- **Permissions**: evdev requires root or `input` group membership. WM config changes work as the current user.
 - **Wayland without evdev**: Keys will NOT be blocked. Recommendation: use a kiosk compositor like `cage` or grant `input` group access.
-- **Graceful ungrab**: The evdev filter loop runs until process exit or device error. On `std::process::exit(0)`, the kernel automatically releases the `EVIOCGRAB` when the fd is closed. The X11 fallback's `XNextEvent` drain loop has the same ungrab-on-exit limitation as before.
+- **Config persistence**: WM shortcut changes (KDE, GNOME) persist until manually restored. This is intentional for kiosk deployments.
+- **Graceful ungrab**: The evdev filter loop runs until process exit or device error. On `std::process::exit(0)`, the kernel automatically releases the `EVIOCGRAB` when the fd is closed.
 
 ### Keyboard capture on Windows
 
@@ -102,6 +107,7 @@ For Super/Win key on Linux X11, `AnyModifier` is used so all Super+X combos are 
 - CLI argument parsing with presets
 - GitHub Actions CI for Windows + Linux
 - Keyboard capture on Linux via evdev (bypasses WM grabs, works on X11 and Wayland)
+- Multi-layer keyboard guard: Tauri prevent_close + WM shortcut disabling (KDE 5/6, GNOME, XFCE) + X11 grabs + evdev
 
 ## What needs work
 

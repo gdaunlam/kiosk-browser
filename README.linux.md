@@ -84,16 +84,41 @@ cargo tauri dev -- -- --url https://example.com --fullscreen --block-keys-preset
 
 ## Keyboard guard details
 
-The keyboard guard uses a two-tier strategy:
+The keyboard guard uses a multi-layer strategy. All layers run simultaneously
+for maximum coverage across different environments (bare-metal, VNC, containers).
 
-### Primary: evdev backend (recommended)
+### Layer 0: Tauri window protection
+
+When Alt+F4 is in the blocked keys, the app registers a `on_window_event`
+handler that intercepts `CloseRequested` and calls `prevent_close()`. This is
+the last line of defense — even if the WM or OS delivers the close signal, the
+window stays open. Works on both Windows and Linux.
+
+### Layer 1: Window Manager shortcut disabling
+
+Before setting up key grabs, the app attempts to disable conflicting WM shortcuts:
+
+- **KDE Plasma 6**: Calls `disableGlobalShortcuts` via D-Bus (disables all global shortcuts at runtime).
+- **KDE Plasma 5**: Modifies `kglobalshortcutsrc` (Alt+F4, Alt+Tab, Meta+D, etc.) and `kwinrc` (Meta modifier-only shortcut) via `kwriteconfig5`, then triggers `KWin.reconfigure` via D-Bus. When running via `sudo`, executes `kwriteconfig5` as the original user so it writes to the correct config directory.
+- **GNOME**: Disables shortcuts via `gsettings` (overlay-key, switch-applications, close, etc.).
+- **XFCE**: Removes shortcut overrides via `xfconf-query`.
+
+### Layer 2: X11 key grabs
+
+`XGrabKey` on the X11 root window intercepts events injected by VNC/xrdp/virtual
+keyboards that bypass `/dev/input`. Always attempted alongside evdev on X11 sessions.
+
+Subject to `BadAccess` conflicts with remaining WM grabs (Layer 1 mitigates this).
+
+### Layer 3: evdev backend
 
 Grabs keyboard devices exclusively at the kernel input level (`/dev/input/eventN`)
 using `EVIOCGRAB`. Blocked key events are discarded; all other events are
 forwarded through a virtual keyboard created via `uinput`.
 
-This **bypasses the window manager entirely**, so it works even when KDE, GNOME,
-or other WMs hold their own key grabs (the `BadAccess` problem with X11 grabs).
+Bypasses the WM entirely. Effective on bare-metal machines. In VNC/container
+environments, keyboard events arrive via the display protocol and bypass
+`/dev/input`, so evdev alone is not sufficient (Layers 0–2 handle those cases).
 
 **Requirements:**
 - The process must run as **root**, or the user must belong to the **`input` group**:
@@ -108,23 +133,14 @@ or other WMs hold their own key grabs (the `BadAccess` problem with X11 grabs).
 
 **Works on both X11 and Wayland.**
 
-### Fallback: X11 grabs
-
-If evdev is unavailable (insufficient permissions), the guard falls back to
-`XGrabKey` on the X11 root window. This approach has known limitations:
-
-- **Window manager conflicts:** KDE (KWin), GNOME Shell, etc. hold their own
-  grabs on keys like Super. `XGrabKey` fails with `BadAccess` for those keys.
-  The app logs warnings and suggests workarounds (e.g., `gsettings` to release
-  the Super key on GNOME).
-- **X11 only.** Does not work under Wayland.
-
-### Limitations (both backends)
+### Limitations
 
 - **Ctrl+Alt+Del** cannot be blocked (kernel-level on Linux).
 - On Wayland without evdev permissions, keys **will not be blocked**. Use a
   kiosk compositor like [cage](https://github.com/cage-kiosk/cage) or grant
   `input` group access.
+- WM shortcut disabling modifies user configuration files. The changes persist
+  until manually restored (KDE, GNOME) or until the session is reset.
 
 ## Cross-compilation
 

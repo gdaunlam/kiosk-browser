@@ -6,6 +6,12 @@
 
 ## Completado
 
+### Protección multicapa contra atajos del sistema (Linux)
+- **Layer 0 — Tauri `prevent_close`**: `on_window_event` intercepta `CloseRequested` y llama `api.prevent_close()` cuando Alt+F4 está en la lista de teclas bloqueadas. Funciona en Windows y Linux.
+- **Layer 1 — Desactivación de atajos del WM**: En KDE Plasma 6, usa `disableGlobalShortcuts` via D-Bus. En KDE Plasma 5, modifica `kglobalshortcutsrc` y `kwinrc` via `kwriteconfig5` y dispara `reconfigure` via D-Bus. En GNOME usa `gsettings`. En XFCE usa `xfconf-query`. Maneja correctamente el caso `sudo` (ejecuta `kwriteconfig` como el usuario original).
+- **Layer 2 — X11 `XGrabKey`**: Grabs pasivos en la root window para interceptar eventos inyectados por VNC/xrdp que bypasean `/dev/input`.
+- **Layer 3 — evdev `EVIOCGRAB`**: Graba dispositivos físicos de teclado a nivel kernel. Efectivo en bare-metal, no en VNC.
+
 ### Captura de teclado en Linux — backend evdev
 - Implementado backend `evdev` + `uinput` que intercepta a nivel de dispositivo de entrada del kernel.
 - Graba exclusivamente los dispositivos de teclado (`EVIOCGRAB`), filtra teclas bloqueadas y reenvía el resto via un teclado virtual (`uinput`).

@@ -88,9 +88,12 @@ kiosk-browser (Tauri v2)
 │                 ├── file download (on_download handler)
 │                 └── clipboard (native)
 │
+├── Window Protection
+│   └── on_window_event → prevent_close() (blocks Alt+F4 close)
+│
 ├── Keyboard Guard (background thread)
 │   ├── Windows: SetWindowsHookEx(WH_KEYBOARD_LL)
-│   └── Linux:   evdev grab + uinput filter (fallback: XGrabKey)
+│   └── Linux:   WM shortcut disable + X11 grabs + evdev/uinput filter
 │
 └── CLI (clap)
     ├── --url

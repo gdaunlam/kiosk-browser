@@ -2,7 +2,7 @@ mod cli;
 mod keyboard;
 
 use cli::Cli;
-use keyboard::keys::resolve_blocked_keys;
+use keyboard::keys::{resolve_blocked_keys, BlockableKey};
 use url::Url;
 
 const CLOSE_BUTTON_JS: &str = r#"
@@ -43,6 +43,7 @@ pub fn run() {
     });
 
     let blocked_keys = resolve_blocked_keys(&cli.block_keys, &cli.block_keys_preset);
+    let block_alt_f4 = blocked_keys.contains(&BlockableKey::AltF4);
     let fullscreen = cli.fullscreen;
 
     tauri::Builder::default()
@@ -91,6 +92,15 @@ pub fn run() {
                     }
                 })
                 .build()?;
+
+            if block_alt_f4 {
+                win.on_window_event(|event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        log::warn!("Window close blocked (Alt+F4 is in blocked keys)");
+                        api.prevent_close();
+                    }
+                });
+            }
 
             // On Linux: set TLS policy on the webview's actual context, then navigate
             #[cfg(target_os = "linux")]
