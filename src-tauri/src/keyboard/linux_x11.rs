@@ -2,6 +2,7 @@ use super::keys::BlockableKey;
 use std::collections::HashSet;
 use std::os::raw::{c_int, c_uint};
 use std::ptr;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use x11::keysym::*;
 use x11::xlib::*;
@@ -13,6 +14,24 @@ const IGNORED_MODS: [c_uint; 4] = [
     Mod2Mask | LockMask,  // both
 ];
 
+static GRAB_ERRORS: AtomicU32 = AtomicU32::new(0);
+
+unsafe extern "C" fn x_error_handler(_display: *mut Display, event: *mut XErrorEvent) -> c_int {
+    let err = &*event;
+    // BadAccess (10) = another client already grabbed this key
+    if err.error_code == 10 {
+        GRAB_ERRORS.fetch_add(1, Ordering::Relaxed);
+        log::debug!("X11 BadAccess on grab (request={})", err.request_code);
+    } else {
+        log::warn!(
+            "X11 error: code={}, request={}",
+            err.error_code,
+            err.request_code
+        );
+    }
+    0
+}
+
 /// Install X11 key grabs that intercept system shortcuts before the window manager.
 /// Runs an event drain loop on a dedicated background thread.
 pub fn install_hook(keys: HashSet<BlockableKey>) {
@@ -21,11 +40,17 @@ pub fn install_hook(keys: HashSet<BlockableKey>) {
         .spawn(move || unsafe {
             let display = XOpenDisplay(ptr::null());
             if display.is_null() {
-                log::error!("Failed to open X11 display — keyboard guard disabled");
+                log::error!(
+                    "Failed to open X11 display (DISPLAY={:?}) — keyboard guard disabled",
+                    std::env::var("DISPLAY").ok()
+                );
                 return;
             }
 
+            XSetErrorHandler(Some(x_error_handler));
+
             let root = XDefaultRootWindow(display);
+            GRAB_ERRORS.store(0, Ordering::Relaxed);
             let mut grab_count = 0u32;
 
             for key in &keys {
@@ -33,7 +58,20 @@ pub fn install_hook(keys: HashSet<BlockableKey>) {
             }
 
             XSync(display, False);
-            log::info!("X11 keyboard guard installed ({grab_count} grabs on root window)");
+
+            let errors = GRAB_ERRORS.load(Ordering::Relaxed);
+            if errors > 0 {
+                log::warn!(
+                    "X11 keyboard guard: {errors} grabs failed (BadAccess). \
+                     The window manager likely already holds these key grabs. \
+                     On GNOME, try: gsettings set org.gnome.mutter overlay-key '' \
+                     to release the Super key."
+                );
+            }
+
+            log::info!(
+                "X11 keyboard guard installed ({grab_count} grabs attempted, {errors} failed)"
+            );
 
             drain_events(display);
 
@@ -47,17 +85,17 @@ pub fn install_hook(keys: HashSet<BlockableKey>) {
 }
 
 /// Grab a single key combo on the root window, accounting for NumLock/CapsLock.
-/// Returns the number of successful grabs.
+/// Returns the number of grabs attempted.
 unsafe fn grab_key_combo(display: *mut Display, root: Window, key: &BlockableKey) -> u32 {
     let combos = key_to_x11(display, key);
     let mut count = 0;
     for (keycode, base_mod) in combos {
         if keycode == 0 {
+            log::warn!("Keycode 0 for {:?} — key not found on this keyboard", key);
             continue;
         }
-        // AnyModifier already covers all modifier combinations
         if base_mod == AnyModifier {
-            let result = XGrabKey(
+            XGrabKey(
                 display,
                 keycode as c_int,
                 AnyModifier,
@@ -66,24 +104,19 @@ unsafe fn grab_key_combo(display: *mut Display, root: Window, key: &BlockableKey
                 GrabModeAsync,
                 GrabModeAsync,
             );
-            if result != 0 {
-                count += 1;
-            }
+            count += 1;
         } else {
             for &extra in &IGNORED_MODS {
-                let modmask = base_mod | extra;
-                let result = XGrabKey(
+                XGrabKey(
                     display,
                     keycode as c_int,
-                    modmask,
+                    base_mod | extra,
                     root,
                     True,
                     GrabModeAsync,
                     GrabModeAsync,
                 );
-                if result != 0 {
-                    count += 1;
-                }
+                count += 1;
             }
         }
     }

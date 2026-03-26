@@ -90,7 +90,7 @@ kiosk-browser (Tauri v2)
 │
 ├── Keyboard Guard (background thread)
 │   ├── Windows: SetWindowsHookEx(WH_KEYBOARD_LL)
-│   └── Linux:   XGrabKey on root window
+│   └── Linux:   evdev grab + uinput filter (fallback: XGrabKey)
 │
 └── CLI (clap)
     ├── --url

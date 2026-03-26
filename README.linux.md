@@ -79,28 +79,52 @@ cargo tauri dev -- -- --url https://example.com --fullscreen --block-keys-preset
 ## Run
 
 ```bash
-./kiosk-browser --url https://tailscale-services:38999/ --fullscreen --block-keys-preset kiosk
+./kiosk-browser --url https://tailscale-mudafy:38999/ --fullscreen --block-keys-preset kiosk
 ```
 
 ## Keyboard guard details
 
-Uses `XGrabKey` on the X11 root window to intercept key combinations before
-they reach the window manager. Grabbed keys are silently consumed in a
-background thread (events are drained and discarded).
+The keyboard guard uses a two-tier strategy:
 
-Accounts for NumLock and CapsLock modifiers automatically (grabs all
-combinations of these lock modifiers for each blocked key).
+### Primary: evdev backend (recommended)
 
-### Limitations
+Grabs keyboard devices exclusively at the kernel input level (`/dev/input/eventN`)
+using `EVIOCGRAB`. Blocked key events are discarded; all other events are
+forwarded through a virtual keyboard created via `uinput`.
 
-- **X11 only.** Wayland does not allow applications to grab global keys by design.
-  For Wayland kiosks, use a kiosk compositor like [cage](https://github.com/cage-kiosk/cage)
-  which simply does not expose Alt+Tab, workspaces, etc.
-- Super key (Win) is grabbed with `AnyModifier`, so blocking `win` also
-  prevents all Super+X combinations from reaching the WM.
-- The keyboard guard thread opens its own X11 display connection, separate
-  from the Tauri webview. This is safe but means the `DISPLAY` environment
-  variable must be set correctly.
+This **bypasses the window manager entirely**, so it works even when KDE, GNOME,
+or other WMs hold their own key grabs (the `BadAccess` problem with X11 grabs).
+
+**Requirements:**
+- The process must run as **root**, or the user must belong to the **`input` group**:
+  ```bash
+  sudo usermod -aG input $USER
+  # Log out and back in for the group change to take effect
+  ```
+- The kernel module `uinput` must be loaded (usually loaded by default):
+  ```bash
+  sudo modprobe uinput
+  ```
+
+**Works on both X11 and Wayland.**
+
+### Fallback: X11 grabs
+
+If evdev is unavailable (insufficient permissions), the guard falls back to
+`XGrabKey` on the X11 root window. This approach has known limitations:
+
+- **Window manager conflicts:** KDE (KWin), GNOME Shell, etc. hold their own
+  grabs on keys like Super. `XGrabKey` fails with `BadAccess` for those keys.
+  The app logs warnings and suggests workarounds (e.g., `gsettings` to release
+  the Super key on GNOME).
+- **X11 only.** Does not work under Wayland.
+
+### Limitations (both backends)
+
+- **Ctrl+Alt+Del** cannot be blocked (kernel-level on Linux).
+- On Wayland without evdev permissions, keys **will not be blocked**. Use a
+  kiosk compositor like [cage](https://github.com/cage-kiosk/cage) or grant
+  `input` group access.
 
 ## Cross-compilation
 
